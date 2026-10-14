@@ -1,0 +1,109 @@
+# dsh-roleplay bundle patch: one agent preset, `roleplay`.
+#
+# Modelled on the shipped `minimal` preset
+# (`packages/bundle/web-app/presets/minimal.patch.yml` of DeepSeek Harness): one
+# persistent shell tool and nothing else. Three things differ, all deliberate:
+#
+#   * NO `agent-instructions` row. The Web bundle disables that row on the host
+#     plane, so a preset that omits it injects no workspace instructions at all:
+#     no `AGENTS.md`, no `CLAUDE.md`, no `$DSH_HOME/AGENTS.md`.
+#
+#   * The persona row is mounted for what it SUPPRESSES, not for what it says. Its
+#     prefix is empty, so it contributes no character text; `complete: true` makes
+#     that empty prefix the whole system prompt, which also drops the fixed
+#     `harness:identity` section ("You are an AI agent powered by DeepSeek
+#     Harness.") that `dsh-system-prompt` registers for every agent; and
+#     `includeRuntimeContext: false` suppresses the runtime-context snapshots
+#     (sandbox mode, approval policy, working directory, platform). The rendered
+#     system prompt of a role-play session is therefore empty, and the character
+#     comes only from the conversation. Dropping this row entirely would restore
+#     the harness identity line and the runtime-context block.
+#
+#   * The one tool is the same persistent shell `minimal` mounts, copied verbatim:
+#     one PTY per session so environment, working directory, and history survive
+#     across calls. Every row carries its own platform gate, because the Loader
+#     treats a `group` row as always enabled and would ignore `disabled` on it.
+- insert:
+    - id: preset-roleplay
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: roleplay
+        name: Role play
+        description: >-
+          基于 minimal 的角色扮演预设：一个持久 shell，persona 为空、不注入 AGENTS.md、
+          不注入运行时上下文，角色只来自对话。
+        order: 11
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: ''
+              complete: true
+              includeRuntimeContext: false
+          - id: persistent-shell
+            name: cordis:group
+            group: true
+            isolate:
+              terminals: true
+            config:
+              - id: pty
+                name: '@deepseek-ai/dsh-terminal'
+              - id: terminal-bash
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+              - id: persistent-bash
+                name: '@deepseek-ai/dsh-tool-bash-persistent'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: |-
+                    Run commands in a bash shell
+                    * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+                    * Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.
+                    * State is persistent across command calls and discussions with the user.
+                    * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+                    * Please avoid commands that may produce a very large amount of output.
+                    * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+              - id: terminal-pwsh
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  shellDialect: pwsh
+                  timeoutMs: 300000
+              - id: persistent-pwsh
+                name: '@deepseek-ai/dsh-tool-pwsh-persistent'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: |-
+                    Run commands in a PowerShell shell
+                    * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+                    * You don't have access to the internet via this tool.
+                    * State is persistent across command calls and discussions with the user.
+                    * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
+                    * Please avoid commands that may produce a very large amount of output.
+                    * Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.
+
+          # ── the whitelist ────────────────────────────────────────────────────────────────────
+          #
+          # A preset only ADDS rows; it cannot remove a host-plane registration, so every global
+          # tool in the deployment reaches every agent unless the agent's own scope filters it.
+          # This row installs that filter: an `allow` set, which is a whitelist rather than a
+          # snapshot of today's names. Whatever the deployment already registers — the profile's
+          # history, subagent and lsp rows today — and whatever a plugin installed later registers
+          # is invisible to these agents. See tool-allowlist.js for the enforcement point.
+          #
+          # The single allowed name is the persistent shell mounted above; the platform expression
+          # mirrors the platform gates on those rows, and a mismatch fails the agent's creation
+          # loudly instead of silently hiding the shell.
+          #
+          # `preset` is the id of THIS declaration. The row cannot infer it from its own scope, and
+          # a declaration that names another preset would strip that preset's agents, so the row
+          # verifies the id against the declaration that mounts it and refuses to load otherwise.
+          - id: tool-allowlist
+            name: 'dsh-roleplay/tool-allowlist.js'
+            config:
+              preset: roleplay
+              allow: !!js "process.platform === 'win32' ? ['pwsh'] : ['bash']"

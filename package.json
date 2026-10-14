@@ -1,0 +1,40 @@
+{
+  "name": "dsh-roleplay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A role-play agent preset for DeepSeek Harness: one persistent shell, an empty system prompt, no AGENTS.md and no runtime context, so the character comes only from the conversation.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "bundle",
+    "agent-preset",
+    "role-play"
+  ],
+  "license": "MIT",
+  "author": "windwhiterain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/windwhiterain/dsh-roleplay.git"
+  },
+  "homepage": "https://github.com/windwhiterain/dsh-roleplay#readme",
+  "bugs": {
+    "url": "https://github.com/windwhiterain/dsh-roleplay/issues"
+  },
+  "exports": {
+    "./tool-allowlist.js": "./tool-allowlist.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "tool-allowlist.js",
+    "README.md",
+    "probe/*.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
