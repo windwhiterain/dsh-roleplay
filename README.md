@@ -2,8 +2,9 @@
 
 A role-play agent preset for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-Select **Role play** when starting a task and the agent gets a persistent shell, an empty system
-prompt, and exactly one tool. Everything the character is comes from the conversation.
+Select **Role play** when starting a task and the agent gets a persistent shell, the filesystem tools
+(`read`, `write`, `edit`), image reading, an empty system prompt, and nothing else. Everything the
+character is comes from the conversation.
 
 ## What it composes
 
@@ -11,13 +12,15 @@ prompt, and exactly one tool. Everything the character is comes from the convers
 |---|---|
 | `@deepseek-ai/dsh-persona` | Empty prefix, `complete: true`, `includeRuntimeContext: false` |
 | `persistent-shell` (`cordis:group`) | One PTY per session plus one persistent shell tool per platform |
-| `tool-allowlist` | `dsh-roleplay/tool-allowlist.js`, `preset: roleplay`, `allow: ['pwsh']` or `['bash']` |
+| `tool-fs` | `@deepseek-ai/dsh-tool-fs`: `read`, `write`, `edit`, and `read_image` |
+| `compaction` (`cordis:group`) | Per-session compaction threshold, `/compact`, tool-result trimming |
+| `tool-allowlist` | `dsh-roleplay/tool-allowlist.js`, `preset: roleplay`, `allow: ['read', 'write', 'edit', 'read_image', 'pwsh']` or the POSIX shell |
 
-Nothing else. In particular there is no `agent-instructions` row.
+In particular there is no `agent-instructions` row.
 
 ## What the model sees
 
-The preset is a copy of the shipped `minimal` preset with four deliberate differences.
+The preset is a copy of the shipped `minimal` preset with five deliberate differences.
 
 ### No workspace instructions
 
@@ -47,6 +50,35 @@ platform-selected backend, and `@deepseek-ai/dsh-tool-bash-persistent` on POSIX 
 `@deepseek-ai/dsh-tool-pwsh-persistent` on Windows. Environment, working directory, and history
 survive across calls. To role-play with no tools at all, remove both the `persistent-shell` group
 and the `tool-allowlist` row from `cordis.patch.yml`.
+
+### Files and images
+
+`minimal` mounts no filesystem tools. This preset adds `@deepseek-ai/dsh-tool-fs`, one row that
+registers `read`, `write`, `edit`, and `read_image`. The Web bundle disables its own host-plane
+`tool-fs` row, so these agents are the only ones in the deployment that hold them. The row carries
+no configuration: a narrower surface is the allow list's job, and one row cannot register a subset.
+
+`read_image` carries two gates, both owned by the package rather than by this composition:
+
+- **Registration is conditional.** It appears only while a durable attachment store is mounted. The
+  base bundle mounts `@deepseek-ai/dsh-attachment-local`, so it registers here. A deployment that
+  dropped that row would leave `read_image` unserved, and the allow list below would then reject
+  every agent of this preset by name instead of quietly leaving the character unable to see
+  pictures.
+- **Execution is conditional on the routed model.** A route whose exact model does not declare
+  image input refuses with `cannot read "<path>" as an image: model "<model>" does not declare image
+  input; switch to an image-capable model to read images`. Several routes in the picker are text
+  only, so image reading follows the model the session runs.
+
+Two more behaviors come from the deployment around this preset:
+
+- `complete: true` also suppresses the system-prompt paragraphs `tool-fs` registers for reading,
+  writing, and editing. The schemas and descriptions still reach the model, so the tools work
+  without the prose that recommends one over another.
+- The shipped `fs-observation-policy` requires a prior read at an unchanged version before a
+  mutation. The profile this preset runs in disables that row, so `write` and `edit` are
+  unconditional here. A session switched to a read-only sandbox still refuses them, with the
+  harness's own escalation hint.
 
 ### A tool whitelist that survives outside changes
 
@@ -83,10 +115,14 @@ properties of that call matter:
 Two configuration mistakes fail loud instead of degrading silently. `config.preset` is verified
 against the declaration that actually mounts this module, so naming another preset (which would
 strip THAT preset's agents) refuses to load. And an `allow` name this preset mounts no such tool
-for rejects the agent, naming the tools that are visible, rather than restricting to nothing.
+for rejects the agent, naming the tools that are visible, rather than restricting to nothing. That
+second rule is what couples the list to the rows above it: `read_image` is served only while the
+attachment store is mounted, so a deployment that removed it would fail this preset loudly rather
+than hand its agents a silently shorter list.
 
 To widen or narrow what role-play agents hold, edit `config.allow` in
-[cordis.patch.yml](cordis.patch.yml); nothing else needs to move.
+[cordis.patch.yml](cordis.patch.yml); nothing else needs to move. Every name added there must be a
+tool the preset's own rows register, or the agents stop being created at all.
 
 ## Hot reload
 
@@ -123,19 +159,23 @@ manager reports `restart-required`. New tasks then list **Role play** under the 
 | `tool-allowlist.js` | The row that keeps these agents on `config.allow` |
 | `package.json` | Bundle manifest (`dsh.bundle.patch`) and the row's export |
 | `probe/preset-probe.mjs` | Reads both patch files and proves the composition above |
-| `probe/allowlist-probe.mjs` | Mounts the real tool registry and proves the whitelist holds |
+| `probe/allowlist-probe.mjs` | Mounts the real tool registry against the shipped allow list and proves the whitelist holds |
 | `probe/session-scan.mjs` | Reads a compressed session log to show what actually reached a model |
 
 `preset-probe.mjs` compares this preset's child list against the shipped
 `packages/bundle/web-app/presets/minimal.patch.yml`, then mounts the declared persona config
-against the real `dsh-system-prompt` service. It fails if the tool rows drift from `minimal`, if any
-workspace-instruction row appears, or if the rendered system prompt is not empty.
+against the real `dsh-system-prompt` service. It fails if the tool rows drift from `minimal`, if the
+added filesystem row is missing or carries configuration, if the allow expression stops naming
+every tool the preset mounts, if any workspace-instruction row appears, or if the rendered system
+prompt is not empty.
 
-`allowlist-probe.mjs` mounts the real `dsh-tools` registry with host-plane tools, joins an agent to
-a scope that mounts this row, and dispatches `agent/created` through the agent's scope carrier the
-way `dsh-agent` does. It fails if a tool registered after the restriction reaches the agent, if a
-hidden tool still executes, if the restriction leaks to a session outside the preset, if the
-agent's own registered tool is filtered, or if a missing allow name is accepted.
+`allowlist-probe.mjs` mounts the real `dsh-tools` registry with host-plane tools, reads the shipped
+allow list out of `cordis.patch.yml` and evaluates it the way the Loader evaluates a `!!js` scalar,
+joins an agent to a scope that mounts this row, and dispatches `agent/created` through the agent's
+scope carrier the way `dsh-agent` does. It fails if the shipped list drops image reading, if a tool
+registered after the restriction reaches the agent, if a hidden tool still executes, if the
+restriction leaks to a session outside the preset, if the agent's own registered tool is filtered, or
+if a missing allow name is accepted.
 
 Run both from a DeepSeek Harness checkout:
 

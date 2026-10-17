@@ -1,8 +1,10 @@
 # dsh-roleplay bundle patch: one agent preset, `roleplay`.
 #
 # Modelled on the shipped `minimal` preset
-# (`packages/bundle/web-app/presets/minimal.patch.yml` of DeepSeek Harness): one
-# persistent shell tool and nothing else. Three things differ, all deliberate:
+# (`packages/bundle/web-app/presets/minimal.patch.yml` of DeepSeek Harness): the
+# same one persistent shell tool, plus the filesystem suite a character needs to
+# read a setting, keep a draft, and look at a picture. Four things differ, all
+# deliberate:
 #
 #   * NO `agent-instructions` row. The Web bundle disables that row on the host
 #     plane, so a preset that omits it injects no workspace instructions at all:
@@ -17,12 +19,19 @@
 #     (sandbox mode, approval policy, working directory, platform). The rendered
 #     system prompt of a role-play session is therefore empty, and the character
 #     comes only from the conversation. Dropping this row entirely would restore
-#     the harness identity line and the runtime-context block.
+#     the harness identity line and the runtime-context block. It also means the
+#     filesystem suite ships without its system-prompt guidance paragraphs.
 #
-#   * The one tool is the same persistent shell `minimal` mounts, copied verbatim:
+#   * The shell is the same persistent shell `minimal` mounts, copied verbatim:
 #     one PTY per session so environment, working directory, and history survive
 #     across calls. Every row carries its own platform gate, because the Loader
 #     treats a `group` row as always enabled and would ignore `disabled` on it.
+#
+#   * `@deepseek-ai/dsh-tool-fs` is ADDED, which `minimal` does not mount:
+#     `read`, `write`, `edit`, and `read_image`. The Web bundle disables its own
+#     host-plane `tool-fs` row, so this is the only copy in the deployment and it
+#     belongs to this preset's agents alone. See the row's comment for the two
+#     gates `read_image` carries.
 - insert:
     - id: preset-roleplay
       name: '@deepseek-ai/dsh-agent-preset'
@@ -31,7 +40,8 @@
         name: Role play
         description: >-
           基于 minimal 的角色扮演预设：一个持久 shell，persona 为空、不注入 AGENTS.md、
-          不注入运行时上下文，角色只来自对话。
+          不注入运行时上下文，角色只来自对话；再加 read / write / edit 与读图 read_image；
+          压缩走 per-session 阈值插件（composer chip 可调），另含 /compact 与 tool 结果预裁剪。
         order: 11
         plugins:
           - id: persona
@@ -86,6 +96,55 @@
                     * Please avoid commands that may produce a very large amount of output.
                     * Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.
 
+          # ── files and images ──────────────────────────────────────────────────────────
+          #
+          # The model-facing filesystem suite: `read`, `write`, `edit`, and `read_image`. One row
+          # registers all four, so there is no configuration here — a narrower surface is the
+          # whitelist's job, not this row's.
+          #
+          # `read_image` is composition-conditional: the package registers it only while a durable
+          # `ctx.attachments` store is mounted, which the base bundle does
+          # (`@deepseek-ai/dsh-attachment-local`). Execution then refuses on a route whose exact
+          # model does not declare image input, so a character can be shown a picture only on a
+          # vision-capable model — and the refusal names the model and the remedy rather than
+          # failing vaguely.
+          #
+          # The row publishes no service, so it sits loose next to the shell group instead of in a
+          # group of its own. The Web bundle disables its own host-plane `tool-fs` row, so these
+          # agents are the only ones in the deployment that hold these tools.
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          # ── compaction ─────────────────────────────────────────────────────────────────
+          #
+          # The `compaction-threshold` engine row replaces the shipped
+          # `@deepseek-ai/dsh-compaction-basic` backend, exactly as the `whiting` preset does, so
+          # these sessions get the per-session threshold, the composer chip that edits it, and
+          # `/compaction-threshold`. The plugin is inert for every preset that does not mount
+          # this row (`presetMountsEngine` in its lib/policy.js), so the stock presets keep the
+          # native backend untouched.
+          #
+          # The group carries an `isolate` realm because the backend publishes a service; the
+          # pruner is optional and lets a trim land before a summary is priced. `/compact` needs
+          # no backend of its own and follows whichever one this realm provides.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-threshold-engine
+                name: dsh-compaction-threshold/engine
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
           # ── the whitelist ────────────────────────────────────────────────────────────────────
           #
           # A preset only ADDS rows; it cannot remove a host-plane registration, so every global
@@ -95,9 +154,12 @@
           # history, subagent and lsp rows today — and whatever a plugin installed later registers
           # is invisible to these agents. See tool-allowlist.js for the enforcement point.
           #
-          # The single allowed name is the persistent shell mounted above; the platform expression
-          # mirrors the platform gates on those rows, and a mismatch fails the agent's creation
-          # loudly instead of silently hiding the shell.
+          # The allowed names are the persistent shell mounted above plus the four tools the
+          # filesystem row registers. The platform expression mirrors the platform gates on the
+          # shell rows, and a mismatch fails the agent's creation loudly instead of silently hiding
+          # the shell. Naming `read_image` is safe only because `attachment-local` is mounted on the
+          # host plane: a deployment that dropped it would make this name unserved and every agent
+          # of this preset would be rejected with the visible tool list.
           #
           # `preset` is the id of THIS declaration. The row cannot infer it from its own scope, and
           # a declaration that names another preset would strip that preset's agents, so the row
@@ -106,4 +168,4 @@
             name: 'dsh-roleplay/tool-allowlist.js'
             config:
               preset: roleplay
-              allow: !!js "process.platform === 'win32' ? ['pwsh'] : ['bash']"
+              allow: !!js "['read', 'write', 'edit', 'read_image', process.platform === 'win32' ? 'pwsh' : 'bash']"

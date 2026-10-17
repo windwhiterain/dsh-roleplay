@@ -2,9 +2,10 @@
  * Diagnostic: what does the `roleplay` preset actually compose, and what reaches the model?
  *
  * Two things need proof that reading the YAML cannot give. First, that the declared child list is
- * the shipped `minimal` composition and nothing else — in particular that no
- * `agent-instructions` row can inject `AGENTS.md`. Second, that the persona row with an empty
- * prefix and `complete: true` really renders the empty system prompt, dropping the fixed
+ * the shipped `minimal` composition plus exactly one added filesystem row and nothing else — in
+ * particular that no `agent-instructions` row can inject `AGENTS.md`, and that the whitelist names
+ * every tool those rows register. Second, that the persona row with an empty prefix and
+ * `complete: true` really renders the empty system prompt, dropping the fixed
  * `harness:identity` section, and that `includeRuntimeContext: false` empties the context
  * snapshots.
  *
@@ -50,25 +51,52 @@ function moduleNames(plugins) {
   return names
 }
 
+/** One child row of a preset's plugin list, addressed by id rather than by position. */
+function row(plugins, id) {
+  const found = plugins.find(child => child?.id === id)
+  if (found === undefined) {
+    throw new Error(`no "${id}" row among: ${plugins.map(child => child?.id).join(', ')}`)
+  }
+  return found
+}
+
 const roleplay = definition(ROLEPLAY, 'roleplay')
 const minimal = definition(MINIMAL, 'minimal')
 
-console.log('roleplay child rows:', roleplay.plugins.map(row => row.id).join(', '))
+console.log('roleplay child rows:', roleplay.plugins.map(child => child.id).join(', '))
 console.log('roleplay modules:', moduleNames(roleplay.plugins).join(', '))
 
 const instructions = moduleNames(roleplay.plugins).filter(name => name.includes('agent-instructions'))
 if (instructions.length > 0) throw new Error(`roleplay mounts a workspace-instruction row: ${instructions.join(', ')}`)
 console.log('no workspace-instruction row: confirmed')
 
-const [roleplayPersona, roleplayShell, allowlistRow] = roleplay.plugins
+const roleplayPersona = row(roleplay.plugins, 'persona')
+const roleplayShell = row(roleplay.plugins, 'persistent-shell')
+const roleplayFs = row(roleplay.plugins, 'tool-fs')
+const allowlistRow = row(roleplay.plugins, 'tool-allowlist')
 const [minimalPersona, minimalShell] = minimal.plugins
-if (roleplay.plugins.length !== 3) throw new Error(`unexpected child rows: ${roleplay.plugins.map(row => row.id).join(', ')}`)
+const expectedRows = ['persona', 'persistent-shell', 'tool-fs', 'compaction', 'tool-allowlist']
+if (JSON.stringify(roleplay.plugins.map(child => child.id)) !== JSON.stringify(expectedRows)) {
+  throw new Error(`unexpected child rows: ${roleplay.plugins.map(child => child.id).join(', ')}`)
+}
 if (roleplayPersona.name !== minimalPersona.name) throw new Error('the persona row is not the row minimal mounts')
 if (JSON.stringify(roleplayShell) !== JSON.stringify(minimalShell)) {
   throw new Error('the tool row is not identical to minimal:\n'
     + `roleplay: ${JSON.stringify(roleplayShell)}\nminimal:  ${JSON.stringify(minimalShell)}`)
 }
 console.log('tool row is byte-identical to minimal:', roleplayShell.id)
+
+// The filesystem row: one loose row that publishes no service, carrying no configuration, and
+// registering exactly the four names the whitelist below has to name. `minimal` mounts no such row,
+// so this is what the preset adds on top of it.
+if (roleplayFs.name !== '@deepseek-ai/dsh-tool-fs') {
+  throw new Error(`unexpected filesystem row: ${JSON.stringify(roleplayFs)}`)
+}
+if (roleplayFs.config !== undefined) throw new Error('the filesystem row must carry no configuration')
+if (minimal.plugins.some(child => child?.id === 'tool-fs')) {
+  throw new Error('minimal now mounts a filesystem row, so this preset no longer adds one')
+}
+console.log('filesystem row:', JSON.stringify(roleplayFs))
 
 const expectedShell = new Set(['pty', 'terminal-bash', 'persistent-bash', 'terminal-pwsh', 'persistent-pwsh'])
 const shellIds = roleplayShell.config.map(child => child.id)
@@ -95,6 +123,15 @@ if (!allowExpression.includes("'pwsh'") || !allowExpression.includes("'bash'")) 
 if (!allowExpression.includes("process.platform === 'win32'")) {
   throw new Error('the whitelist expression must gate on the platform, like the shell rows it names')
 }
+// The filesystem names belong to that same expression: `read_image` registers only while a durable
+// attachment store is mounted, so a name this preset cannot serve rejects the agent loudly at
+// creation instead of quietly restricting it to the shell.
+for (const tool of ['read', 'write', 'edit', 'read_image']) {
+  if (!allowExpression.includes(`'${tool}'`)) {
+    throw new Error(`the whitelist expression does not name the ${tool} tool`)
+  }
+}
+console.log('whitelist names the filesystem suite: read, write, edit, read_image')
 
 const persona = roleplayPersona.config
 console.log('roleplay persona config:', JSON.stringify(persona))
@@ -130,4 +167,4 @@ try {
   await ctx.fiber.dispose()
 }
 
-console.log('the roleplay preset renders no system prompt and mounts no instruction row')
+console.log('the roleplay preset renders no system prompt, mounts no instruction row, and names every tool it mounts')

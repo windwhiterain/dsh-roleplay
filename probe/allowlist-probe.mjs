@@ -7,6 +7,11 @@
  * it is the agent's own restriction, so a tool the agent's own scope registers survives; and a
  * configuration that names a preset not mounting this row refuses to load.
  *
+ * The allow list is read from the shipped `cordis.patch.yml` and evaluated the way the Loader
+ * evaluates a `!!js` scalar, so the preset's own configuration is the single source of truth here:
+ * the simulated preset scope registers one stub per name the configuration claims, and the
+ * assertions below compare against that same list.
+ *
  * It mounts the real `dsh-tools` registry and the real `dsh-scope` graph, loads the shipped
  * `tool-allowlist.js`, and dispatches `agent/created` through an agent's scope carrier exactly as
  * `dsh-agent` does. Only the two host services the row reads — the registry's declaration text and
@@ -16,15 +21,29 @@
  * `node --import tsx/esm C:/resource/dsh-roleplay/probe/allowlist-probe.mjs`
  */
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Context } from '../../deepseek-harness/vendor/cordis/src/index.ts'
 import SystemPrompt from '../../deepseek-harness/packages/core/system-prompt/src/index.ts'
 import ToolRuntime from '../../deepseek-harness/packages/core/tools/src/index.ts'
 import { bindScopeParent, createScope, scopeTarget } from '../../deepseek-harness/packages/core/scope/src/index.ts'
+import { loadCordisYaml, presetDefinitions } from '../../deepseek-harness/scripts/cordis-yaml.ts'
 import * as allowlist from '../tool-allowlist.js'
 
 const ROW_MODULE = 'dsh-roleplay/tool-allowlist.js'
 const PRESET = 'roleplay'
 const OTHER = 'whiting'
+const PATCH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
+
+/** The tool names the shipped preset hands its agents, evaluated the way the Loader evaluates `!!js`. */
+function shippedAllowList() {
+  const declaration = presetDefinitions(loadCordisYaml(readFileSync(PATCH, 'utf8')))
+    .find(entry => entry.id === PRESET)
+  if (declaration === undefined) throw new Error(`${PATCH} declares no preset "${PRESET}"`)
+  const row = declaration.plugins.find(child => child?.id === 'tool-allowlist')
+  if (row?.config?.allow?.__jsExpr === undefined) throw new Error('the whitelist row declares no !!js allow list')
+  return new Function(`return (${row.config.allow.__jsExpr})`)()
+}
 
 /** A registered tool good enough for visibility and dispatch. */
 function tool(name) {
@@ -104,12 +123,18 @@ const sessions = new Map()
 ctx.tools.register(tool('history_read'))
 ctx.tools.register(tool('lsp'))
 
-// `roleplay` as the declaration mounts it: a standing scope holding the persistent shell, plus
-// this row.
+// `roleplay` as the declaration mounts it: a standing scope holding the persistent shell and the
+// filesystem suite, plus this row. Every name the shipped allow list claims gets a stub, which is
+// the correspondence production enforces loudly — a name the preset mounts no tool for rejects the
+// agent instead of restricting it to nothing.
+const ALLOW = shippedAllowList()
+console.log('shipped allow list:', JSON.stringify(ALLOW))
+if (!ALLOW.includes('read_image')) throw new Error('the shipped preset no longer allows image reading')
+
 const roleplayKey = { preset: PRESET }
 const roleplay = await mint(ctx, roleplayKey)
-roleplay.ctx.tools.register(tool('pwsh'))
-await roleplay.ctx.plugin(allowlist, { preset: PRESET, allow: ['pwsh'] })
+for (const name of ALLOW) roleplay.ctx.tools.register(tool(name))
+await roleplay.ctx.plugin(allowlist, { preset: PRESET, allow: ALLOW })
 
 // The preset a blank session starts on, before the user picks Role play.
 const otherKey = { preset: OTHER }
@@ -129,7 +154,7 @@ expectTools(ctx, 'blank session under the default preset', blank, ['edit', 'hist
 // the row reads the new composition.
 blankBinding.rebind(roleplayKey)
 select(ctx, blank, PRESET)
-expectTools(ctx, 'after switching the blank session to roleplay', blank, ['pwsh'])
+expectTools(ctx, 'after switching the blank session to roleplay', blank, ALLOW)
 
 // Switching again releases the restriction with the preset.
 blankBinding.rebind(otherKey)
@@ -142,7 +167,7 @@ const directScope = await mint(ctx, direct, roleplayKey)
 direct.ctx = directScope.ctx
 sessions.set(direct.id, direct)
 await announce(ctx, direct)
-expectTools(ctx, 'session created under roleplay', direct, ['pwsh'])
+expectTools(ctx, 'session created under roleplay', direct, ALLOW)
 
 // The enforcement half: a hidden name is not merely unlisted, it cannot be called.
 const denied = await execute(ctx, 'history_read', direct)
@@ -151,11 +176,11 @@ if (!denied.includes('unknown tool')) throw new Error('a hidden tool still execu
 
 // Outside change: a tool registered after the restriction must stay hidden from these agents.
 ctx.tools.register(tool('installed-later'))
-expectTools(ctx, 'after a new global tool', direct, ['pwsh'])
+expectTools(ctx, 'after a new global tool', direct, ALLOW)
 
 // The exemption that keeps delegation working: a tool the agent's OWN scope registers stays.
 directScope.ctx.tools.register(tool('report'))
-expectTools(ctx, 'after the agent registers its own tool', direct, ['pwsh', 'report'])
+expectTools(ctx, 'after the agent registers its own tool', direct, [...ALLOW, 'report'])
 
 // ── configuration that cannot be trusted fails at load ────────────────────────────────────────
 const check = async (label, mounted) => {

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A role-play agent preset for DeepSeek Harness: one persistent shell, an empty system prompt, no AGENTS.md and no runtime context, so the character comes only from the conversation.",
+  "description": "A role-play agent preset for DeepSeek Harness: one persistent shell, the filesystem tools and image reading, an empty system prompt, no AGENTS.md and no runtime context, so the character comes only from the conversation.",
   "keywords": [
     "dsh",
     "deepseek-harness",
